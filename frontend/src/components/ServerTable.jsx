@@ -1,4 +1,6 @@
-export default function ServerTable({ servers, onAction }) {
+import { Link } from "react-router-dom";
+
+export default function ServerTable({ servers }) {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -11,7 +13,7 @@ export default function ServerTable({ servers, onAction }) {
           <thead>
             <tr>
               <th>Hostname</th>
-              <th>IP &amp; Port</th>
+              <th>IP</th>
               <th>System</th>
               <th>Team</th>
               <th>Actions</th>
@@ -35,18 +37,18 @@ export default function ServerTable({ servers, onAction }) {
                 <td>{server.team || "—"}</td>
                 <td>
                   <div className="row-actions">
-                    <button
+                    <Link
+                      to={`/reset/${encodeURIComponent(server.hostname)}`}
                       className="btn btn-danger btn-sm"
-                      onClick={() => onAction(server, "reset")}
                     >
                       Reset
-                    </button>
-                    <button
+                    </Link>
+                    <Link
+                      to={`/console/${encodeURIComponent(server.hostname)}`}
                       className="btn btn-primary btn-sm"
-                      onClick={() => onAction(server, "console")}
                     >
                       Console
-                    </button>
+                    </Link>
                   </div>
                 </td>
               </tr>

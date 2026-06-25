@@ -1,14 +1,15 @@
 # Windows Server Manager
 
-A full-stack web application for managing and monitoring Windows servers. Server inventory is read from a local `prometheus.yml` file (the `windows_exporter` scrape job), and operators can remotely reboot servers or download RDP console files.
+A unified full-stack web application for managing Windows servers on a **single port**. Server inventory is read from a local `prometheus.yml` file (the `windows_exporter` scrape job). Operators can remotely reboot servers or open an interactive web-based terminal over WinRM.
 
 ## Features
 
-- **Dark, minimalist UI** — server table with hostname, IP/port, system, and team
+- **Single-port architecture** — FastAPI serves the React SPA and all API/WebSocket routes together
+- **Dark, minimalist UI** — server table with hostname, IP, system, and team
 - **YAML-driven inventory** — parses `scrape_configs` for job `windows_exporter`
-- **Reset** — remote reboot via `net use`, `shutdown /r`, and cleanup
-- **Console** — generates and downloads an `.rdp` file for Remote Desktop
-- **Auth modal** — centralized password prompt per server action
+- **Reset page** (`/reset/<hostname>`) — remote reboot with detailed operation summary, timing, and command logs
+- **Web console** (`/console/<hostname>`) — interactive xterm.js terminal streamed over WebSockets via WinRM
+- **Emergency commands sidebar** — pre-fills the terminal prompt (does not auto-execute)
 
 ## Project Structure
 
@@ -16,30 +17,36 @@ A full-stack web application for managing and monitoring Windows servers. Server
 auto-remidat-winservers/
 ├── prometheus.yml          # Server inventory (sample included)
 ├── backend/
-│   ├── main.py             # FastAPI application
+│   ├── main.py             # FastAPI app (API + static SPA)
 │   ├── requirements.txt
 │   └── services/
-│       ├── yaml_parser.py  # Parse prometheus.yml
+│       ├── yaml_parser.py
 │       ├── reset_service.py
-│       └── rdp_service.py
+│       └── winrm_session.py
 └── frontend/
-    ├── index.html
-    ├── package.json
-    ├── vite.config.js
+    ├── dist/               # Built SPA (generated)
     └── src/
-        ├── App.jsx
-        ├── api.js
-        ├── index.css
+        ├── pages/
+        │   ├── AllServersPage.jsx
+        │   ├── ResetPage.jsx
+        │   └── ConsolePage.jsx
         └── components/
-            ├── AuthModal.jsx
-            └── ServerTable.jsx
 ```
+
+## UI Routes
+
+| Route | Description |
+|-------|-------------|
+| `/all-servers` | Home — grid of all servers from prometheus.yml |
+| `/reset/<hostname>` | Reset page with password prompt and operation analysis |
+| `/console/<hostname>` | Interactive web terminal with emergency commands sidebar |
 
 ## Prerequisites
 
 - **Python 3.10+**
 - **Node.js 18+**
-- **Windows** (required for Reset and RDP password embedding)
+- **Windows** (required for remote reset via `net use` / `shutdown`)
+- Target servers with **WinRM enabled** (port 5985 HTTP or 5986 HTTPS)
 - A valid `prometheus.yml` with a `windows_exporter` job
 
 ### prometheus.yml format
@@ -56,94 +63,89 @@ scrape_configs:
           srv_name: WEB-SRV-01
 ```
 
-## Setup
+## Setup & Run (Single Port)
 
 ### 1. Configure prometheus.yml
 
-Replace the sample `prometheus.yml` in the project root with your real Prometheus config, or point the backend to it:
+Replace the sample `prometheus.yml` in the project root, or set:
 
 ```powershell
 $env:PROMETHEUS_YML_PATH = "C:\path\to\prometheus.yml"
 ```
 
-### 2. Backend
+### 2. Install dependencies
 
 ```powershell
+# Backend
 cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
+
+# Frontend
+cd ..\frontend
+npm install
+npm run build
 ```
 
-API docs: http://127.0.0.1:8000/docs
-
-### 3. Frontend
-
-In a second terminal:
+### 3. Start the application
 
 ```powershell
-cd frontend
-npm install
-npm run dev
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Open http://localhost:5173
+Open **http://localhost:8000/all-servers**
 
-The Vite dev server proxies API requests to the backend on port 8000.
+Everything — UI, REST API, and WebSocket console — runs on port **8000**.
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/all-servers` | Returns JSON array of servers from YAML |
-| POST | `/reset/{hostname}` | Body: `{ "password": "..." }` — remote reboot |
-| POST | `/console/{hostname}` | Body: `{ "password": "..." }` — downloads `.rdp` file |
-| GET | `/health` | Health check |
+| GET | `/api/all-servers` | JSON array of servers from YAML |
+| GET | `/api/servers/{hostname}` | Single server metadata |
+| POST | `/api/reset/{hostname}` | Body: `{ "password": "..." }` — remote reboot with detailed result |
+| WS | `/api/ws/console/{hostname}` | Interactive WinRM terminal (send `{ "password": "..." }` first) |
+| GET | `/api/health` | Health check |
 
-### Example: GET /all-servers
+### WebSocket protocol
 
-```json
-[
-  {
-    "hostname": "WEB-SRV-01",
-    "ip": "192.168.1.10",
-    "port": "9182",
-    "system": "Production",
-    "team": "Infrastructure"
-  }
-]
-```
+1. Connect to `/api/ws/console/{hostname}`
+2. Send: `{ "password": "..." }`
+3. Receive: `{ "type": "connected", "message": "..." }` or `{ "type": "error", ... }`
+4. Send input: `{ "type": "input", "data": "dir\r\n" }`
+5. Receive output: `{ "type": "output", "data": "..." }`
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROMETHEUS_YML_PATH` | `../prometheus.yml` (project root) | Path to prometheus config |
-| `FRONTEND_ORIGIN` | `http://localhost:5173` | CORS allowed origin |
-| `VITE_API_URL` | `""` (uses Vite proxy in dev) | Frontend API base URL for production builds |
+| `PROMETHEUS_YML_PATH` | `../prometheus.yml` | Path to prometheus config |
+| `PORT` | `8000` | Server port |
+| `WINRM_PORT` | `5985` | WinRM port on target servers |
+| `WINRM_USE_SSL` | `false` | Use HTTPS WinRM (port 5986) |
+| `WINRM_TRANSPORT` | `ntlm` | WinRM auth transport |
 
-## Production Build
+## Development
+
+After changing frontend code, rebuild and restart:
 
 ```powershell
-# Backend
-cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000
-
-# Frontend
 cd frontend
 npm run build
-npm run preview
+cd ..\backend
+uvicorn main:app --reload --port 8000
 ```
 
-Set `VITE_API_URL=http://your-backend-host:8000` before `npm run build` if the API is on a different origin.
+API docs (Swagger): http://localhost:8000/docs
 
 ## Security Notes
 
-- Passwords are sent over HTTPS in production; use TLS when deploying.
-- Reset requires local Windows credentials and network access to target IPC$.
-- RDP passwords are encrypted with Windows `CryptProtectData` when running on Windows.
-- Restrict who can reach this application — it performs privileged remote operations.
+- Use HTTPS in production — passwords travel over the wire for reset and console sessions.
+- Reset requires network access to target IPC$ and Administrator credentials.
+- WinRM must be enabled and reachable on target servers.
+- Restrict network access to this application — it performs privileged remote operations.
 
 ## License
 
