@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: windows_exporter
+    static_configs:
+      - targets:
+          - 192.168.1.10:9182
+          - 192.168.1.11:9182
+        labels:
+          system: Production
+          team: Infrastructure
+          srv_name: WEB-SRV-01
+      - targets:
+          - 192.168.1.20:9182
+        labels:
+          system: Staging
+          team: DevOps
+          srv_name: DB-SRV-01
+      - targets:
+          - 10.0.0.5:9182
+        labels:
+          system: Production
+          team: Security
+          srv_name: AD-SRV-01
