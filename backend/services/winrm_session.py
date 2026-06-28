@@ -34,21 +34,9 @@ class WinRMSession:
         )
 
         scheme = "https" if self.use_ssl else "http"
-        endpoint = f"{scheme}://{host}:{self.port}/wsman"
-
-        try:
-            self.protocol = Protocol(
-                endpoint=endpoint,
-                transport=os.getenv("WINRM_TRANSPORT", "ntlm"),
-                username=username,
-                password=password,
-                server_cert_validation="ignore",  # Always ignore for localhost/127.0.0.1
-            )
-            print(f"[WinRM] Protocol initialized successfully for {endpoint}")
-        except Exception as e:
-            print(f"[WinRM ERROR] Failed to initialize Protocol: {str(e)}")
-            traceback.print_exc()
-            raise
+        self.endpoint = f"{scheme}://{host}:{self.port}/wsman"
+        
+        self.protocol = self._create_protocol()
 
         self.shell_id: str | None = None
         self.command_id: str | None = None
@@ -56,8 +44,23 @@ class WinRMSession:
         self._reader_thread: threading.Thread | None = None
         self._closed = False
         self._error: str | None = None
-        self._retry_count = 0
-        self._max_retries = 3
+
+    def _create_protocol(self) -> Protocol:
+        """Create a fresh Protocol instance with NTLM auth."""
+        try:
+            protocol = Protocol(
+                endpoint=self.endpoint,
+                transport=os.getenv("WINRM_TRANSPORT", "ntlm"),
+                username=self.username,
+                password=self.password,
+                server_cert_validation="ignore",
+            )
+            print(f"[WinRM] Protocol initialized successfully for {self.endpoint}")
+            return protocol
+        except Exception as e:
+            print(f"[WinRM ERROR] Failed to initialize Protocol: {str(e)}")
+            traceback.print_exc()
+            raise
 
     @property
     def error(self) -> str | None:
@@ -85,6 +88,9 @@ class WinRMSession:
     def _poll_output(self) -> None:
         assert self.shell_id is not None
         assert self.command_id is not None
+        
+        retry_count = 0
+        max_retries = 5
 
         while not self._closed:
             try:
@@ -92,7 +98,7 @@ class WinRMSession:
                     self.shell_id, self.command_id
                 )
                 # Reset retry count on successful read
-                self._retry_count = 0
+                retry_count = 0
                 
                 if stdout_bytes:
                     self._output_queue.put(
@@ -112,17 +118,46 @@ class WinRMSession:
                 print(f"[WinRM ERROR] Error type: {error_type}")
                 
                 # Check if it's an auth/MIC error that we can recover from
-                if "BadMICError" in error_type or "MIC" in error_msg or "401" in error_msg or "400" in error_msg:
-                    self._retry_count += 1
-                    print(f"[WinRM] Retry attempt {self._retry_count}/{self._max_retries}")
+                if any(err in error_type or err in error_msg for err in ["BadMICError", "MIC", "401", "400", "WinRMTransportError"]):
+                    retry_count += 1
+                    print(f"[WinRM] Retry attempt {retry_count}/{max_retries}")
                     
-                    if self._retry_count < self._max_retries:
-                        # Try to recover by sleeping and continuing
-                        time.sleep(0.5)
-                        continue
+                    if retry_count < max_retries:
+                        try:
+                            print(f"[WinRM] Attempting to recreate Protocol and reconnect...")
+                            
+                            # Close old session if exists
+                            try:
+                                if self.shell_id and self.command_id:
+                                    self.protocol.cleanup_command(self.shell_id, self.command_id)
+                            except:
+                                pass
+                            try:
+                                if self.shell_id:
+                                    self.protocol.close_shell(self.shell_id)
+                            except:
+                                pass
+                            
+                            # Create fresh protocol
+                            self.protocol = self._create_protocol()
+                            
+                            # Reopen shell and command
+                            self.shell_id = self.protocol.open_shell()
+                            print(f"[WinRM] Shell reopened. Shell ID: {self.shell_id}")
+                            
+                            self.command_id = self.protocol.run_command(self.shell_id, "cmd.exe", ["/Q"])
+                            print(f"[WinRM] Command restarted. Command ID: {self.command_id}")
+                            
+                            # Retry the get_command_output
+                            time.sleep(0.5)
+                            continue
+                        except Exception as retry_exc:
+                            print(f"[WinRM ERROR] Reconnection attempt failed: {str(retry_exc)}")
+                            time.sleep(0.5)
+                            continue
                     else:
                         # Give up after max retries
-                        self._error = f"WinRM session lost after {self._max_retries} retries: {error_msg}"
+                        self._error = f"WinRM session lost after {max_retries} retries: {error_msg}"
                         print(f"[WinRM ERROR] {self._error}")
                         break
                 else:
