@@ -93,6 +93,9 @@ class WinRMSession:
     def send_input(self, data: str) -> None:
         if self._closed or not self.shell_id or not self.command_id:
             return
+        # Ensure input ends with newline for proper command execution
+        if not data.endswith('\r\n'):
+            data += '\r\n'
         self.protocol.send_command_input(
             self.shell_id, self.command_id, data.encode("utf-8")
         )
