@@ -6,6 +6,7 @@ import os
 import queue
 import threading
 import time
+import traceback
 from typing import Callable
 
 from winrm import Protocol
@@ -35,13 +36,19 @@ class WinRMSession:
         scheme = "https" if self.use_ssl else "http"
         endpoint = f"{scheme}://{host}:{self.port}/wsman"
 
-        self.protocol = Protocol(
-            endpoint=endpoint,
-            transport=os.getenv("WINRM_TRANSPORT", "ntlm"),
-            username=username,
-            password=password,
-            server_cert_validation="ignore" if self.use_ssl else "validate",
-        )
+        try:
+            self.protocol = Protocol(
+                endpoint=endpoint,
+                transport=os.getenv("WINRM_TRANSPORT", "ntlm"),
+                username=username,
+                password=password,
+                server_cert_validation="ignore" if self.use_ssl else "validate",
+            )
+            print(f"[WinRM] Protocol initialized successfully for {endpoint}")
+        except Exception as e:
+            print(f"[WinRM ERROR] Failed to initialize Protocol: {str(e)}")
+            traceback.print_exc()
+            raise
 
         self.shell_id: str | None = None
         self.command_id: str | None = None
@@ -55,10 +62,23 @@ class WinRMSession:
         return self._error
 
     def connect(self) -> None:
-        self.shell_id = self.protocol.open_shell()
-        self.command_id = self.protocol.run_command(self.shell_id, "cmd.exe", ["/Q"])
-        self._reader_thread = threading.Thread(target=self._poll_output, daemon=True)
-        self._reader_thread.start()
+        try:
+            print(f"[WinRM] Attempting to connect to {self.host}:{self.port}...")
+            self.shell_id = self.protocol.open_shell()
+            print(f"[WinRM] Shell opened successfully. Shell ID: {self.shell_id}")
+            
+            self.command_id = self.protocol.run_command(self.shell_id, "cmd.exe", ["/Q"])
+            print(f"[WinRM] Command started successfully. Command ID: {self.command_id}")
+            
+            self._reader_thread = threading.Thread(target=self._poll_output, daemon=True)
+            self._reader_thread.start()
+            print("[WinRM] Output reader thread started")
+        except Exception as e:
+            print(f"[WinRM ERROR] Connection failed: {str(e)}")
+            print(f"[WinRM ERROR] Error type: {type(e).__name__}")
+            print(f"[WinRM ERROR] Full traceback:")
+            traceback.print_exc()
+            raise
 
     def _poll_output(self) -> None:
         assert self.shell_id is not None
@@ -81,7 +101,11 @@ class WinRMSession:
                     break
                 time.sleep(0.05)
             except Exception as exc:
-                self._error = str(exc)
+                error_msg = str(exc)
+                self._error = error_msg
+                print(f"[WinRM ERROR] Output polling failed: {error_msg}")
+                print(f"[WinRM ERROR] Error type: {type(exc).__name__}")
+                traceback.print_exc()
                 break
 
     def read_output(self, timeout: float = 0.1) -> str | None:
@@ -93,25 +117,31 @@ class WinRMSession:
     def send_input(self, data: str) -> None:
         if self._closed or not self.shell_id or not self.command_id:
             return
-        # Ensure input ends with newline for proper command execution
-        if not data.endswith('\r\n'):
-            data += '\r\n'
-        self.protocol.send_command_input(
-            self.shell_id, self.command_id, data.encode("utf-8")
-        )
+        try:
+            # Ensure input ends with newline for proper command execution
+            if not data.endswith('\r\n'):
+                data += '\r\n'
+            self.protocol.send_command_input(
+                self.shell_id, self.command_id, data.encode("utf-8")
+            )
+        except Exception as e:
+            print(f"[WinRM ERROR] Failed to send input: {str(e)}")
+            traceback.print_exc()
 
     def close(self) -> None:
         self._closed = True
         if self.shell_id and self.command_id:
             try:
                 self.protocol.cleanup_command(self.shell_id, self.command_id)
-            except Exception:
-                pass
+                print("[WinRM] Command cleaned up successfully")
+            except Exception as e:
+                print(f"[WinRM ERROR] Failed to cleanup command: {str(e)}")
         if self.shell_id:
             try:
                 self.protocol.close_shell(self.shell_id)
-            except Exception:
-                pass
+                print("[WinRM] Shell closed successfully")
+            except Exception as e:
+                print(f"[WinRM ERROR] Failed to close shell: {str(e)}")
 
 
 def stream_session(
