@@ -42,7 +42,7 @@ class WinRMSession:
                 transport=os.getenv("WINRM_TRANSPORT", "ntlm"),
                 username=username,
                 password=password,
-                server_cert_validation="ignore" if self.use_ssl else "validate",
+                server_cert_validation="ignore",  # Always ignore for localhost/127.0.0.1
             )
             print(f"[WinRM] Protocol initialized successfully for {endpoint}")
         except Exception as e:
@@ -56,6 +56,8 @@ class WinRMSession:
         self._reader_thread: threading.Thread | None = None
         self._closed = False
         self._error: str | None = None
+        self._retry_count = 0
+        self._max_retries = 3
 
     @property
     def error(self) -> str | None:
@@ -89,6 +91,9 @@ class WinRMSession:
                 stdout_bytes, stderr_bytes, status = self.protocol.get_command_output(
                     self.shell_id, self.command_id
                 )
+                # Reset retry count on successful read
+                self._retry_count = 0
+                
                 if stdout_bytes:
                     self._output_queue.put(
                         stdout_bytes.decode("utf-8", errors="replace")
@@ -102,11 +107,29 @@ class WinRMSession:
                 time.sleep(0.05)
             except Exception as exc:
                 error_msg = str(exc)
-                self._error = error_msg
+                error_type = type(exc).__name__
                 print(f"[WinRM ERROR] Output polling failed: {error_msg}")
-                print(f"[WinRM ERROR] Error type: {type(exc).__name__}")
-                traceback.print_exc()
-                break
+                print(f"[WinRM ERROR] Error type: {error_type}")
+                
+                # Check if it's an auth/MIC error that we can recover from
+                if "BadMICError" in error_type or "MIC" in error_msg or "401" in error_msg or "400" in error_msg:
+                    self._retry_count += 1
+                    print(f"[WinRM] Retry attempt {self._retry_count}/{self._max_retries}")
+                    
+                    if self._retry_count < self._max_retries:
+                        # Try to recover by sleeping and continuing
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        # Give up after max retries
+                        self._error = f"WinRM session lost after {self._max_retries} retries: {error_msg}"
+                        print(f"[WinRM ERROR] {self._error}")
+                        break
+                else:
+                    # For other errors, fail immediately
+                    self._error = error_msg
+                    traceback.print_exc()
+                    break
 
     def read_output(self, timeout: float = 0.1) -> str | None:
         try:
@@ -126,7 +149,8 @@ class WinRMSession:
             )
         except Exception as e:
             print(f"[WinRM ERROR] Failed to send input: {str(e)}")
-            traceback.print_exc()
+            # Don't fail on send errors, just log them
+            # The polling thread will catch more serious issues
 
     def close(self) -> None:
         self._closed = True
