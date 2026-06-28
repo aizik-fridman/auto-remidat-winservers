@@ -36,6 +36,10 @@ class WinRMSession:
         scheme = "https" if self.use_ssl else "http"
         self.endpoint = f"{scheme}://{host}:{self.port}/wsman"
         
+        # Get transport type, default to basic for better compatibility
+        self.transport_type = os.getenv("WINRM_TRANSPORT", "basic")
+        print(f"[WinRM] Using transport: {self.transport_type}")
+        
         self.protocol = self._create_protocol()
 
         self.shell_id: str | None = None
@@ -46,11 +50,11 @@ class WinRMSession:
         self._error: str | None = None
 
     def _create_protocol(self) -> Protocol:
-        """Create a fresh Protocol instance with NTLM auth."""
+        """Create a fresh Protocol instance."""
         try:
             protocol = Protocol(
                 endpoint=self.endpoint,
-                transport=os.getenv("WINRM_TRANSPORT", "ntlm"),
+                transport=self.transport_type,
                 username=self.username,
                 password=self.password,
                 server_cert_validation="ignore",
@@ -90,7 +94,7 @@ class WinRMSession:
         assert self.command_id is not None
         
         retry_count = 0
-        max_retries = 5
+        max_retries = 3
 
         while not self._closed:
             try:
@@ -117,8 +121,8 @@ class WinRMSession:
                 print(f"[WinRM ERROR] Output polling failed: {error_msg}")
                 print(f"[WinRM ERROR] Error type: {error_type}")
                 
-                # Check if it's an auth/MIC error that we can recover from
-                if any(err in error_type or err in error_msg for err in ["BadMICError", "MIC", "401", "400", "WinRMTransportError"]):
+                # Check if it's a recoverable error
+                if any(err in error_type or err in error_msg for err in ["BadMICError", "MIC", "401", "400", "WinRMTransportError", "HTTPError"]):
                     retry_count += 1
                     print(f"[WinRM] Retry attempt {retry_count}/{max_retries}")
                     
@@ -148,12 +152,12 @@ class WinRMSession:
                             self.command_id = self.protocol.run_command(self.shell_id, "cmd.exe", ["/Q"])
                             print(f"[WinRM] Command restarted. Command ID: {self.command_id}")
                             
-                            # Retry the get_command_output
-                            time.sleep(0.5)
+                            # Wait before retry
+                            time.sleep(1)
                             continue
                         except Exception as retry_exc:
                             print(f"[WinRM ERROR] Reconnection attempt failed: {str(retry_exc)}")
-                            time.sleep(0.5)
+                            time.sleep(1)
                             continue
                     else:
                         # Give up after max retries
@@ -185,7 +189,6 @@ class WinRMSession:
         except Exception as e:
             print(f"[WinRM ERROR] Failed to send input: {str(e)}")
             # Don't fail on send errors, just log them
-            # The polling thread will catch more serious issues
 
     def close(self) -> None:
         self._closed = True
