@@ -29,3 +29,9 @@ scrape_configs:
           system: Production
           team: Security
           srv_name: AD-SRV-01
+      - targets:
+          - 127.0.0.1:9182
+        labels:
+          system: Testing
+          team: Shoham
+          srv_name: MY-PC-HOME

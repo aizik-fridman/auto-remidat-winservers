@@ -1,71 +1,75 @@
-import { useEffect, useState } from "react";
-import { fetchServers } from "../api";
-import PageHeader from "../components/PageHeader";
-import ServerTable from "../components/ServerTable";
+import { useState, useEffect, useCallback } from "react";
+import PageHeader from "../components/PageHeader.jsx";
+import ServerTable from "../components/ServerTable.jsx";
+import { fetchServers } from "../api.js";
 
+/**
+ * AllServersPage — main dashboard showing all servers in a card grid.
+ */
 export default function AllServersPage() {
-  const [servers, setServers] = useState([]);
+  const [servers, setServers] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    loadServers();
-  }, []);
-
-  async function loadServers() {
+  const load = useCallback(async () => {
     setLoading(true);
-    setError("");
+    setError(null);
     try {
       const data = await fetchServers();
       setServers(data);
     } catch (err) {
-      setError(err.message || "Unable to load servers");
+      setError(err.message || "Failed to load servers");
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   return (
-    <div className="app">
+    <>
       <PageHeader
-        eyebrow="Monitoring"
-        title="Windows Server Manager"
-        subtitle={
-          <>
-            Servers sourced from <code>prometheus.yml</code> — windows_exporter job
-          </>
-        }
+        eyebrow="Operations"
+        title="Monitoring Center"
+        subtitle="Manage and monitor your Windows server fleet"
       >
-        <button className="btn btn-ghost" onClick={loadServers} disabled={loading}>
-          Refresh
+        <button
+          className="btn btn--ghost"
+          onClick={load}
+          disabled={loading}
+        >
+          {loading ? (
+            <>
+              <span className="spinner spinner--sm" /> Refreshing…
+            </>
+          ) : (
+            "↻ Refresh"
+          )}
         </button>
       </PageHeader>
 
-      <main className="main">
-        {loading && (
-          <div className="state-card">
+      <main className="page-wrapper">
+        {loading && !servers && (
+          <div className="loading-state">
             <div className="spinner" />
-            <p>Loading servers…</p>
+            <p className="loading-state__text">Loading servers…</p>
           </div>
         )}
 
-        {!loading && error && (
-          <div className="state-card state-error">
-            <p>{error}</p>
-            <button className="btn btn-primary" onClick={loadServers}>
+        {error && (
+          <div className="error-state">
+            <div className="error-state__icon">⚠️</div>
+            <p className="error-state__message">{error}</p>
+            <button className="btn btn--primary" onClick={load}>
               Retry
             </button>
           </div>
         )}
 
-        {!loading && !error && servers.length === 0 && (
-          <div className="state-card">
-            <p>No servers found in the windows_exporter job.</p>
-          </div>
-        )}
-
-        {!loading && !error && servers.length > 0 && <ServerTable servers={servers} />}
+        {!loading && !error && servers && <ServerTable servers={servers} />}
       </main>
-    </div>
+    </>
   );
 }

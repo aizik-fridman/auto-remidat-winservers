@@ -1,7 +1,7 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import AllServersPage from "./pages/AllServersPage";
-import ConsolePage from "./pages/ConsolePage";
-import ResetPage from "./pages/ResetPage";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import AllServersPage from "./pages/AllServersPage.jsx";
+import ResetPage from "./pages/ResetPage.jsx";
+import ConsolePage from "./pages/ConsolePage.jsx";
 
 export default function App() {
   return (

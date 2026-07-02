@@ -1,4 +1,4 @@
-"""Remote Windows server reboot via net use and shutdown."""
+"""Remote Windows server reboot via ``net use`` + ``shutdown /r``."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from typing import Any
 
 @dataclass
 class CommandStep:
+    """One shell command executed during the reset sequence."""
+
     command: str
     success: bool
     output: str
@@ -19,6 +21,8 @@ class CommandStep:
 
 @dataclass
 class ResetResult:
+    """Aggregate result of the multi-step reset procedure."""
+
     status: str
     message: str
     steps: list[CommandStep] = field(default_factory=list)
@@ -46,29 +50,67 @@ class ResetResult:
 
 
 def _run_command(command: str, timeout: int = 60) -> CommandStep:
+    """Execute *command* in a shell and return a :class:`CommandStep`."""
     started = time.perf_counter()
-    result = subprocess.run(
-        command,
-        shell=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return CommandStep(
+            command=command,
+            success=False,
+            output=f"Command timed out after {timeout} seconds",
+            duration_ms=timeout * 1000,
+        )
+
     duration_ms = int((time.perf_counter() - started) * 1000)
-    output = (result.stdout or "").strip()
-    if result.stderr:
-        stderr = result.stderr.strip()
-        output = f"{output}\n{stderr}".strip() if output else stderr
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if stdout and stderr:
+        output = f"{stdout}\n{stderr}"
+    else:
+        output = stdout or stderr or "(no output)"
 
     return CommandStep(
         command=command,
         success=result.returncode == 0,
-        output=output or "(no output)",
+        output=output,
         duration_ms=duration_ms,
     )
 
 
+def _escape_password(password: str) -> str:
+    """Escape a password for safe use inside a double-quoted CMD argument.
+
+    Characters that have special meaning in cmd.exe are escaped with ``^``
+    and embedded double-quotes are doubled (``"`` -> ``""``) so the whole
+    token can be wrapped in ``"..."`` safely.
+    """
+    # Double any embedded double-quotes so they survive the CMD parser.
+    escaped = password.replace('"', '""')
+    # Escape common CMD meta-characters that could break the command.
+    for ch in ("^", "&", "|", "<", ">", "%"):
+        escaped = escaped.replace(ch, f"^{ch}")
+    return escaped
+
+
 def reset_server(target_ip: str, password: str) -> ResetResult:
+    """Reboot *target_ip* using ``net use`` + ``shutdown /r /m``.
+
+    Steps:
+    1. ``net use \\\\IP\\IPC$ /user:Administrator "password"``
+    2. ``shutdown /r /m \\\\IP /t 0 /f``
+    3. ``net use \\\\IP\\IPC$ /delete``
+
+    If any step fails the sequence is aborted and the partial result is
+    returned with ``status="failure"``.
+    """
     started_at = datetime.now(timezone.utc)
     started_perf = time.perf_counter()
 
@@ -79,6 +121,7 @@ def reset_server(target_ip: str, password: str) -> ResetResult:
             started_at=started_at.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
+
     if not password:
         return ResetResult(
             status="failure",
@@ -87,27 +130,20 @@ def reset_server(target_ip: str, password: str) -> ResetResult:
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    escaped_password = password.replace('"', '\\"')
+    safe_password = _escape_password(password)
     share = f"\\\\{target_ip}\\IPC$"
 
     commands = [
-        f'net use "{share}" /user:Administrator "{escaped_password}"',
+        f'net use "{share}" /user:Administrator "{safe_password}"',
         f"shutdown /r /m \\\\{target_ip} /t 0 /f",
-        f'net use "{share}" /delete',
+        f'net use "{share}" /delete /y',
     ]
 
     steps: list[CommandStep] = []
     for command in commands:
-        try:
-            step = _run_command(command)
-        except subprocess.TimeoutExpired:
-            step = CommandStep(
-                command=command,
-                success=False,
-                output="Command timed out after 60 seconds",
-                duration_ms=60000,
-            )
+        step = _run_command(command)
         steps.append(step)
+
         if not step.success:
             finished_at = datetime.now(timezone.utc)
             return ResetResult(
@@ -116,7 +152,9 @@ def reset_server(target_ip: str, password: str) -> ResetResult:
                 steps=steps,
                 started_at=started_at.isoformat(),
                 finished_at=finished_at.isoformat(),
-                execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
+                execution_time_ms=int(
+                    (time.perf_counter() - started_perf) * 1000
+                ),
             )
 
     finished_at = datetime.now(timezone.utc)

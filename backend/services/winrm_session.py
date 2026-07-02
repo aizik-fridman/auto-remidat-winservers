@@ -1,19 +1,96 @@
-"""Interactive WinRM shell session for web terminal streaming."""
+"""Command-at-a-time WinRM session wrapper using pywinrm.
+
+Each command is executed independently — no persistent interactive shell
+is maintained.  This avoids the HTTP 400 errors caused by long-lived
+``Protocol.open_shell`` / ``send_command_input`` sessions.
+"""
 
 from __future__ import annotations
 
 import os
-import queue
-import threading
-import time
-import traceback
-from typing import Callable
+import re
+from typing import Any
 
-from winrm import Protocol
+import winrm
+
+
+# PowerShell cmdlet prefixes that signal a command should be routed through
+# ``session.run_ps`` instead of ``session.run_cmd``.
+_PS_CMDLET_PREFIXES: tuple[str, ...] = (
+    "get-",
+    "set-",
+    "new-",
+    "remove-",
+    "invoke-",
+    "start-",
+    "stop-",
+    "restart-",
+    "test-",
+    "import-",
+    "export-",
+    "select-",
+    "where-",
+    "foreach-",
+    "format-",
+    "out-",
+    "write-",
+    "read-",
+    "clear-",
+    "add-",
+    "enable-",
+    "disable-",
+    "enter-",
+    "exit-",
+    "register-",
+    "unregister-",
+    "measure-",
+    "update-",
+    "sort-",
+    "group-",
+    "compare-",
+    "convertto-",
+    "convertfrom-",
+    "resolve-",
+    "copy-",
+    "move-",
+    "rename-",
+    "split-",
+    "join-",
+    "tee-",
+    "wait-",
+    "debug-",
+    "trace-",
+    "show-",
+    "find-",
+    "save-",
+    "install-",
+    "uninstall-",
+    "publish-",
+    "use-",
+)
+
+# Regex that matches common PowerShell-only syntax.
+_PS_SYNTAX_RE = re.compile(r"[$@{}\[\]]|\|.*(?:where|select|foreach|format)")
+
+
+def _is_powershell(cmd: str) -> bool:
+    """Heuristic: return ``True`` when *cmd* looks like PowerShell."""
+    first_token = cmd.strip().split()[0].lower() if cmd.strip() else ""
+    if first_token.startswith(_PS_CMDLET_PREFIXES):
+        return True
+    if _PS_SYNTAX_RE.search(cmd):
+        return True
+    return False
 
 
 class WinRMSession:
-    """Maintains an open cmd.exe session over WinRM with polled I/O."""
+    """Thin wrapper around :class:`winrm.Session` that runs one command at a
+    time and auto-detects CMD vs PowerShell.
+
+    No persistent shell is kept open between calls — each
+    :meth:`run_command` invocation creates and tears down its own WinRM
+    shell automatically (handled internally by pywinrm).
+    """
 
     def __init__(
         self,
@@ -22,204 +99,62 @@ class WinRMSession:
         username: str = "Administrator",
         port: int | None = None,
         use_ssl: bool | None = None,
+        transport: str | None = None,
     ) -> None:
         self.host = host
         self.username = username
-        self.password = password
         self.port = port or int(os.getenv("WINRM_PORT", "5985"))
-        self.use_ssl = use_ssl if use_ssl is not None else os.getenv("WINRM_USE_SSL", "").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+
+        if use_ssl is not None:
+            self.use_ssl = use_ssl
+        else:
+            self.use_ssl = os.getenv("WINRM_USE_SSL", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+
+        self.transport = transport or os.getenv("WINRM_TRANSPORT", "ntlm")
 
         scheme = "https" if self.use_ssl else "http"
         self.endpoint = f"{scheme}://{host}:{self.port}/wsman"
-        
-        # Get transport type, default to basic for better compatibility
-        self.transport_type = os.getenv("WINRM_TRANSPORT", "basic")
-        print(f"[WinRM] Using transport: {self.transport_type}")
-        
-        self.protocol = self._create_protocol()
 
-        self.shell_id: str | None = None
-        self.command_id: str | None = None
-        self._output_queue: queue.Queue[str] = queue.Queue()
-        self._reader_thread: threading.Thread | None = None
-        self._closed = False
-        self._error: str | None = None
+        self._session = winrm.Session(
+            target=self.endpoint,
+            auth=(username, password),
+            transport=self.transport,
+            server_cert_validation="ignore",
+        )
 
-    def _create_protocol(self) -> Protocol:
-        """Create a fresh Protocol instance."""
-        try:
-            protocol = Protocol(
-                endpoint=self.endpoint,
-                transport=self.transport_type,
-                username=self.username,
-                password=self.password,
-                server_cert_validation="ignore",
-            )
-            print(f"[WinRM] Protocol initialized successfully for {self.endpoint}")
-            return protocol
-        except Exception as e:
-            print(f"[WinRM ERROR] Failed to initialize Protocol: {str(e)}")
-            traceback.print_exc()
-            raise
+    # --------------------------------------------------------------------- #
+    #  Public API                                                            #
+    # --------------------------------------------------------------------- #
 
-    @property
-    def error(self) -> str | None:
-        return self._error
+    def run_command(self, cmd_str: str) -> dict[str, Any]:
+        """Execute *cmd_str* and return ``{stdout, stderr, exit_code}``.
 
-    def connect(self) -> None:
-        try:
-            print(f"[WinRM] Attempting to connect to {self.host}:{self.port}...")
-            self.shell_id = self.protocol.open_shell()
-            print(f"[WinRM] Shell opened successfully. Shell ID: {self.shell_id}")
-            
-            self.command_id = self.protocol.run_command(self.shell_id, "cmd.exe", ["/Q"])
-            print(f"[WinRM] Command started successfully. Command ID: {self.command_id}")
-            
-            self._reader_thread = threading.Thread(target=self._poll_output, daemon=True)
-            self._reader_thread.start()
-            print("[WinRM] Output reader thread started")
-        except Exception as e:
-            print(f"[WinRM ERROR] Connection failed: {str(e)}")
-            print(f"[WinRM ERROR] Error type: {type(e).__name__}")
-            print(f"[WinRM ERROR] Full traceback:")
-            traceback.print_exc()
-            raise
+        If the command looks like PowerShell it is sent via
+        :pymethod:`winrm.Session.run_ps`, otherwise via
+        :pymethod:`winrm.Session.run_cmd`.
+        """
+        cmd_str = cmd_str.strip()
+        if not cmd_str:
+            return {"stdout": "", "stderr": "Empty command", "exit_code": -1}
 
-    def _poll_output(self) -> None:
-        assert self.shell_id is not None
-        assert self.command_id is not None
-        
-        retry_count = 0
-        max_retries = 3
+        if _is_powershell(cmd_str):
+            result = self._session.run_ps(cmd_str)
+        else:
+            result = self._session.run_cmd(cmd_str)
 
-        while not self._closed:
-            try:
-                stdout_bytes, stderr_bytes, status = self.protocol.get_command_output(
-                    self.shell_id, self.command_id
-                )
-                # Reset retry count on successful read
-                retry_count = 0
-                
-                if stdout_bytes:
-                    self._output_queue.put(
-                        stdout_bytes.decode("utf-8", errors="replace")
-                    )
-                if stderr_bytes:
-                    self._output_queue.put(
-                        stderr_bytes.decode("utf-8", errors="replace")
-                    )
-                if status is not None:
-                    break
-                time.sleep(0.05)
-            except Exception as exc:
-                error_msg = str(exc)
-                error_type = type(exc).__name__
-                print(f"[WinRM ERROR] Output polling failed: {error_msg}")
-                print(f"[WinRM ERROR] Error type: {error_type}")
-                
-                # Check if it's a recoverable error
-                if any(err in error_type or err in error_msg for err in ["BadMICError", "MIC", "401", "400", "WinRMTransportError", "HTTPError"]):
-                    retry_count += 1
-                    print(f"[WinRM] Retry attempt {retry_count}/{max_retries}")
-                    
-                    if retry_count < max_retries:
-                        try:
-                            print(f"[WinRM] Attempting to recreate Protocol and reconnect...")
-                            
-                            # Close old session if exists
-                            try:
-                                if self.shell_id and self.command_id:
-                                    self.protocol.cleanup_command(self.shell_id, self.command_id)
-                            except:
-                                pass
-                            try:
-                                if self.shell_id:
-                                    self.protocol.close_shell(self.shell_id)
-                            except:
-                                pass
-                            
-                            # Create fresh protocol
-                            self.protocol = self._create_protocol()
-                            
-                            # Reopen shell and command
-                            self.shell_id = self.protocol.open_shell()
-                            print(f"[WinRM] Shell reopened. Shell ID: {self.shell_id}")
-                            
-                            self.command_id = self.protocol.run_command(self.shell_id, "cmd.exe", ["/Q"])
-                            print(f"[WinRM] Command restarted. Command ID: {self.command_id}")
-                            
-                            # Wait before retry
-                            time.sleep(1)
-                            continue
-                        except Exception as retry_exc:
-                            print(f"[WinRM ERROR] Reconnection attempt failed: {str(retry_exc)}")
-                            time.sleep(1)
-                            continue
-                    else:
-                        # Give up after max retries
-                        self._error = f"WinRM session lost after {max_retries} retries: {error_msg}"
-                        print(f"[WinRM ERROR] {self._error}")
-                        break
-                else:
-                    # For other errors, fail immediately
-                    self._error = error_msg
-                    traceback.print_exc()
-                    break
+        stdout = (result.std_out or b"").decode("utf-8", errors="replace").strip()
+        stderr = (result.std_err or b"").decode("utf-8", errors="replace").strip()
 
-    def read_output(self, timeout: float = 0.1) -> str | None:
-        try:
-            return self._output_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": result.status_code,
+        }
 
-    def send_input(self, data: str) -> None:
-        if self._closed or not self.shell_id or not self.command_id:
-            return
-        try:
-            # Ensure input ends with newline for proper command execution
-            if not data.endswith('\r\n'):
-                data += '\r\n'
-            self.protocol.send_command_input(
-                self.shell_id, self.command_id, data.encode("utf-8")
-            )
-        except Exception as e:
-            print(f"[WinRM ERROR] Failed to send input: {str(e)}")
-            # Don't fail on send errors, just log them
-
-    def close(self) -> None:
-        self._closed = True
-        if self.shell_id and self.command_id:
-            try:
-                self.protocol.cleanup_command(self.shell_id, self.command_id)
-                print("[WinRM] Command cleaned up successfully")
-            except Exception as e:
-                print(f"[WinRM ERROR] Failed to cleanup command: {str(e)}")
-        if self.shell_id:
-            try:
-                self.protocol.close_shell(self.shell_id)
-                print("[WinRM] Shell closed successfully")
-            except Exception as e:
-                print(f"[WinRM ERROR] Failed to close shell: {str(e)}")
-
-
-def stream_session(
-    session: WinRMSession,
-    on_output: Callable[[str], None],
-    stop_event: threading.Event,
-) -> None:
-    """Forward session output to callback until stop_event is set."""
-    while not stop_event.is_set() and not session._closed:
-        if session.error:
-            on_output(f"\r\n[session error] {session.error}\r\n")
-            break
-        chunk = session.read_output(timeout=0.15)
-        if chunk:
-            on_output(chunk)
-        elif session._reader_thread and not session._reader_thread.is_alive():
-            if session.error:
-                on_output(f"\r\n[session error] {session.error}\r\n")
-            break
+    def test_connection(self) -> dict[str, Any]:
+        """Run ``hostname`` to verify connectivity."""
+        return self.run_command("hostname")

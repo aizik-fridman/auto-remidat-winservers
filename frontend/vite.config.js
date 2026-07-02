@@ -7,4 +7,17 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
   },
+  server: {
+    proxy: {
+      "/api/ws": {
+        target: "http://localhost:8000",
+        ws: true,
+        changeOrigin: true,
+      },
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+    },
+  },
 });
