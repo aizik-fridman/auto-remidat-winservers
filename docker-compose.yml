@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  web-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: windows-server-manager:latest
+    container_name: windows-server-manager
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - PROMETHEUS_YML_PATH=/app/prometheus.yml
+      # - WINRM_PORT=5985
+      # - WINRM_USE_SSL=false
+      # - WINRM_TRANSPORT=ntlm
+    volumes:
+      - ./prometheus.yml:/app/prometheus.yml:ro
+    restart: unless-stopped

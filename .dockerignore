@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# IDEs
+.idea
+.vscode
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.venv/
+venv/
+ENV/
+
+# Node/Frontend
+**/node_modules/
+**/dist/
+**/build/
+.npm
+npm-debug.log*
+
+# Docker / local configs
+Dockerfile
+.dockerignore
+docker-compose.yml
