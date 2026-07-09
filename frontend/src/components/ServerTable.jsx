@@ -43,7 +43,14 @@ export default function ServerTable({ servers }) {
           <div key={server.hostname} className="server-card">
             <div className="server-card__header">
               <div>
-                <div className="server-card__hostname">{server.hostname}</div>
+                <div className="server-card__hostname">
+                  {server.hostname}
+                  {server.os && (
+                    <span style={{marginLeft: "0.5rem", fontSize: "0.8em", opacity: 0.8}}>
+                      {server.os === "linux" ? "🐧 Linux" : "🪟 Windows"}
+                    </span>
+                  )}
+                </div>
                 <div className="server-card__ip">{server.ip}</div>
               </div>
             </div>

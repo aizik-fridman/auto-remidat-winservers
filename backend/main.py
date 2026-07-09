@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from services.reset_service import reset_server
 from services.winrm_session import WinRMSession
+from services.ssh_session import SSHSession
 from services.yaml_parser import find_server_by_hostname, load_servers
 
 logger = logging.getLogger("winserver-manager")
@@ -67,10 +68,45 @@ def _winrm_defaults() -> tuple[str, str]:
     return scheme, port
 
 
-def _enrich_server(server: dict[str, str]) -> dict[str, str]:
+# ---------------------------------------------------------------------------
+# OS Detection & Cache
+# ---------------------------------------------------------------------------
+
+_OS_CACHE: dict[str, dict[str, Any]] = {}
+
+async def _check_port(ip: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        conn = asyncio.open_connection(ip, port)
+        reader, writer = await asyncio.wait_for(conn, timeout=timeout)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+async def _detect_os(ip: str) -> str:
+    now = asyncio.get_event_loop().time()
+    if ip in _OS_CACHE and (now - _OS_CACHE[ip]["time"]) < 300:
+        return _OS_CACHE[ip]["os"]
+
+    # Check 22 (SSH) and 5985 (WinRM) concurrently
+    ssh_open, winrm_open = await asyncio.gather(
+        _check_port(ip, 22),
+        _check_port(ip, 5985)
+    )
+    
+    # Simple heuristic
+    os_type = "linux" if ssh_open and not winrm_open else "windows"
+    
+    _OS_CACHE[ip] = {"os": os_type, "time": now}
+    return os_type
+
+
+def _enrich_server(server: dict[str, str], os_type: str = "windows") -> dict[str, str]:
     """Add WinRM metadata fields to a server dict."""
     scheme, port = _winrm_defaults()
     enriched = dict(server)
+    enriched["os"] = os_type
     enriched["exporter_target"] = (
         f"{server['ip']}:{server['port']}" if server.get("port") else server["ip"]
     )
@@ -86,10 +122,15 @@ def _enrich_server(server: dict[str, str]) -> dict[str, str]:
 
 
 @app.get("/api/all-servers")
-def get_all_servers() -> list[dict[str, str]]:
+async def get_all_servers() -> list[dict[str, str]]:
     """Return every server from the prometheus.yml inventory."""
     try:
-        return [_enrich_server(s) for s in load_servers()]
+        servers = load_servers()
+        # Concurrently detect OS for all servers
+        os_results = await asyncio.gather(
+            *[_detect_os(s["ip"]) for s in servers]
+        )
+        return [_enrich_server(s, os_type) for s, os_type in zip(servers, os_results)]
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -99,29 +140,32 @@ def get_all_servers() -> list[dict[str, str]]:
 
 
 @app.get("/api/servers/{hostname}")
-def get_server(hostname: str) -> dict[str, str]:
+async def get_server(hostname: str) -> dict[str, str]:
     """Return a single server by hostname."""
     server = find_server_by_hostname(hostname)
     if not server:
         raise HTTPException(status_code=404, detail=f"Server '{hostname}' not found")
-    return _enrich_server(server)
+    os_type = await _detect_os(server["ip"])
+    return _enrich_server(server, os_type)
 
 
 @app.post("/api/reset/{hostname}")
-def reset_server_endpoint(hostname: str, body: PasswordRequest) -> dict[str, Any]:
-    """Remotely reboot a server via net use + shutdown."""
+async def reset_server_endpoint(hostname: str, body: PasswordRequest) -> dict[str, Any]:
+    """Remotely reboot a server."""
     server = find_server_by_hostname(hostname)
     if not server:
         raise HTTPException(status_code=404, detail=f"Server '{hostname}' not found")
     if not server["ip"]:
         raise HTTPException(status_code=400, detail="Server IP could not be resolved")
 
-    result = reset_server(server["ip"], body.password)
+    os_type = await _detect_os(server["ip"])
+    result = reset_server(server["ip"], body.password, os_type)
     payload = result.to_dict()
     payload["hostname"] = server["hostname"]
     payload["ip"] = server["ip"]
     payload["system"] = server["system"]
     payload["team"] = server["team"]
+    payload["os"] = os_type
 
     if result.status != "success":
         raise HTTPException(status_code=500, detail=payload)
@@ -173,21 +217,27 @@ async def console_websocket(websocket: WebSocket, hostname: str) -> None:
         await websocket.close()
         return
 
-    # --- Create WinRM session & test connection ---------------------------
-    session: WinRMSession | None = None
-    try:
-        session = WinRMSession(server["ip"], password)
+    # --- Create Session & test connection ---------------------------
+    session: WinRMSession | SSHSession | None = None
+    os_type = await _detect_os(server["ip"])
+    is_linux = os_type == "linux"
 
-        # Test connectivity with a lightweight command.
-        test = await asyncio.get_running_loop().run_in_executor(
-            None, session.test_connection
-        )
+    try:
+        if is_linux:
+            session = SSHSession(server["ip"], password)
+            test = await session.test_connection()
+        else:
+            session = WinRMSession(server["ip"], password)
+            # Test connectivity with a lightweight command.
+            test = await asyncio.get_running_loop().run_in_executor(
+                None, session.test_connection
+            )
 
         if test["exit_code"] != 0:
             await websocket.send_json(
                 {
                     "type": "error",
-                    "message": f"WinRM connection test failed: {test['stderr']}",
+                    "message": f"Connection test failed: {test['stderr']}",
                 }
             )
             await websocket.close()
@@ -197,15 +247,15 @@ async def console_websocket(websocket: WebSocket, hostname: str) -> None:
             {
                 "type": "connected",
                 "message": (
-                    f"Connected to {server['hostname']} ({server['ip']}) — "
+                    f"Connected to {server['hostname']} ({server['ip']} - {os_type}) — "
                     f"remote hostname: {test['stdout']}"
                 ),
             }
         )
     except Exception as exc:
-        logger.exception("WinRM connection failed for %s", hostname)
+        logger.exception("Connection failed for %s", hostname)
         await websocket.send_json(
-            {"type": "error", "message": f"WinRM connection failed: {exc}"}
+            {"type": "error", "message": f"Connection failed: {exc}"}
         )
         await websocket.close()
         return
@@ -235,9 +285,12 @@ async def console_websocket(websocket: WebSocket, hostname: str) -> None:
                     continue
 
                 try:
-                    result = await asyncio.get_running_loop().run_in_executor(
-                        None, session.run_command, cmd.strip()
-                    )
+                    if is_linux:
+                        result = await session.run_command(cmd.strip())
+                    else:
+                        result = await asyncio.get_running_loop().run_in_executor(
+                            None, session.run_command, cmd.strip()
+                        )
                     # Build combined output
                     parts: list[str] = []
                     if result["stdout"]:

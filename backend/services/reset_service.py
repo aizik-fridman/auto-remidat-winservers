@@ -100,36 +100,7 @@ def _escape_password(password: str) -> str:
     return escaped
 
 
-def reset_server(target_ip: str, password: str) -> ResetResult:
-    """Reboot *target_ip* using ``net use`` + ``shutdown /r /m``.
-
-    Steps:
-    1. ``net use \\\\IP\\IPC$ /user:Administrator "password"``
-    2. ``shutdown /r /m \\\\IP /t 0 /f``
-    3. ``net use \\\\IP\\IPC$ /delete``
-
-    If any step fails the sequence is aborted and the partial result is
-    returned with ``status="failure"``.
-    """
-    started_at = datetime.now(timezone.utc)
-    started_perf = time.perf_counter()
-
-    if not target_ip.strip():
-        return ResetResult(
-            status="failure",
-            message="Target IP is empty",
-            started_at=started_at.isoformat(),
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-    if not password:
-        return ResetResult(
-            status="failure",
-            message="Password is required",
-            started_at=started_at.isoformat(),
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-
+def _reset_windows(target_ip: str, password: str, started_at: datetime, started_perf: float) -> ResetResult:
     safe_password = _escape_password(password)
     share = f"\\\\{target_ip}\\IPC$"
 
@@ -152,17 +123,117 @@ def reset_server(target_ip: str, password: str) -> ResetResult:
                 steps=steps,
                 started_at=started_at.isoformat(),
                 finished_at=finished_at.isoformat(),
-                execution_time_ms=int(
-                    (time.perf_counter() - started_perf) * 1000
-                ),
+                execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
             )
 
     finished_at = datetime.now(timezone.utc)
     return ResetResult(
         status="success",
-        message="Server reboot initiated successfully",
+        message="Windows server reboot initiated successfully",
         steps=steps,
         started_at=started_at.isoformat(),
         finished_at=finished_at.isoformat(),
         execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
     )
+
+
+def _reset_linux(target_ip: str, password: str, started_at: datetime, started_perf: float) -> ResetResult:
+    import asyncio
+    from services.ssh_session import SSHSession
+
+    steps: list[CommandStep] = []
+    command = "echo $PASSWORD | sudo -S reboot"
+    
+    # We wrap the async call in asyncio.run since this is a synchronous function.
+    # Note: If called from within an existing event loop, we might need a different approach,
+    # but FastAPI executes sync route functions in a separate threadpool without a running loop.
+    async def run_ssh():
+        session = SSHSession(target_ip, password)
+        # Using a slight hack to pass password securely via env or stdin.
+        # It's safer to pass it via asyncssh directly, but `run_command` doesn't support stdin out-of-the-box in our wrapper.
+        # Let's write the command to pass password via echo:
+        safe_pass = password.replace("'", "'\\''")
+        cmd = f"echo '{safe_pass}' | sudo -S reboot"
+        
+        start_step = time.perf_counter()
+        result = await session.run_command(cmd)
+        duration = int((time.perf_counter() - start_step) * 1000)
+        
+        # A successful reboot often returns an error (connection reset by peer) or 0.
+        success = result["exit_code"] in (0, -1)
+        output = result["stdout"] + "\n" + result["stderr"]
+        
+        steps.append(CommandStep(
+            command="sudo -S reboot",
+            success=success,
+            output=output.strip() or "(no output)",
+            duration_ms=duration
+        ))
+        
+        return success, output
+        
+    try:
+        success, output = asyncio.run(run_ssh())
+        if not success:
+            finished_at = datetime.now(timezone.utc)
+            return ResetResult(
+                status="failure",
+                message="Linux reboot failed",
+                steps=steps,
+                started_at=started_at.isoformat(),
+                finished_at=finished_at.isoformat(),
+                execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
+            )
+    except Exception as e:
+        steps.append(CommandStep(
+            command="sudo -S reboot",
+            success=False,
+            output=str(e),
+            duration_ms=0
+        ))
+        finished_at = datetime.now(timezone.utc)
+        return ResetResult(
+            status="failure",
+            message=f"SSH error: {e}",
+            steps=steps,
+            started_at=started_at.isoformat(),
+            finished_at=finished_at.isoformat(),
+            execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
+        )
+
+    finished_at = datetime.now(timezone.utc)
+    return ResetResult(
+        status="success",
+        message="Linux server reboot initiated successfully",
+        steps=steps,
+        started_at=started_at.isoformat(),
+        finished_at=finished_at.isoformat(),
+        execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
+    )
+
+
+def reset_server(target_ip: str, password: str, os_type: str = "windows") -> ResetResult:
+    """Reboot *target_ip* according to *os_type*."""
+    started_at = datetime.now(timezone.utc)
+    started_perf = time.perf_counter()
+
+    if not target_ip.strip():
+        return ResetResult(
+            status="failure",
+            message="Target IP is empty",
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    if not password:
+        return ResetResult(
+            status="failure",
+            message="Password is required",
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    if os_type == "linux":
+        return _reset_linux(target_ip, password, started_at, started_perf)
+    else:
+        return _reset_windows(target_ip, password, started_at, started_perf)

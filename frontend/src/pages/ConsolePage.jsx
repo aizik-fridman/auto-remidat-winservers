@@ -6,8 +6,11 @@ import "@xterm/xterm/css/xterm.css";
 import PageHeader from "../components/PageHeader.jsx";
 import { consoleWebSocketUrl, fetchServer } from "../api.js";
 import emergencyCommands from "../constants/emergencyCommands.js";
+import emergencyCommandsLinux from "../constants/emergencyCommandsLinux.js";
 
-const PROMPT = "\x1b[38;2;59;130;246mC:\\>\x1b[0m ";
+const PROMPT_WIN = "\x1b[38;2;59;130;246mC:\\>\x1b[0m ";
+const PROMPT_LINUX = "\x1b[38;2;16;185;129m$ \x1b[0m ";
+
 
 /**
  * ConsolePage — command-at-a-time web console with xterm.js.
@@ -144,7 +147,8 @@ export default function ConsolePage() {
               `\x1b[38;2;16;185;129m${msg.message || "Connected."}\x1b[0m`
             );
             term.writeln("");
-            term.write(PROMPT);
+            const promptStr = serverInfo?.os === "linux" ? PROMPT_LINUX : PROMPT_WIN;
+            term.write(promptStr);
 
             // Handle key input
             term.onData((data) => {
@@ -153,7 +157,7 @@ export default function ConsolePage() {
                 inputBufferRef.current = "";
                 waitingForOutputRef.current = false;
                 term.writeln("^C");
-                term.write(PROMPT);
+                term.write(promptStr);
                 return;
               }
 
@@ -167,7 +171,7 @@ export default function ConsolePage() {
                 term.writeln(""); // newline after command
 
                 if (cmd.length === 0) {
-                  term.write(PROMPT);
+                  term.write(promptStr);
                   return;
                 }
 
@@ -202,7 +206,8 @@ export default function ConsolePage() {
           if (term) {
             const lines = (msg.data || "").replace(/\r?\n/g, "\r\n");
             term.writeln(lines);
-            term.write(PROMPT);
+            const promptStr = serverInfo?.os === "linux" ? PROMPT_LINUX : PROMPT_WIN;
+            term.write(promptStr);
             waitingForOutputRef.current = false;
           }
         } else if (msg.type === "error") {
@@ -211,7 +216,8 @@ export default function ConsolePage() {
             term.writeln(
               `\x1b[38;2;239;68;68m${msg.data || msg.message || "Error"}\x1b[0m`
             );
-            term.write(PROMPT);
+            const promptStr = serverInfo?.os === "linux" ? PROMPT_LINUX : PROMPT_WIN;
+            term.write(promptStr);
             waitingForOutputRef.current = false;
           }
         }
@@ -413,7 +419,7 @@ export default function ConsolePage() {
                   ⚡ Emergency Commands
                 </div>
                 <ul className="emergency-list">
-                  {emergencyCommands.map((ec) => (
+                  {(serverInfo?.os === "linux" ? emergencyCommandsLinux : emergencyCommands).map((ec) => (
                     <li key={ec.label}>
                       <button
                         className="emergency-btn"
