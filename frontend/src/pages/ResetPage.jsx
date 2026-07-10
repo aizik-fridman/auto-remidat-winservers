@@ -13,6 +13,7 @@ export default function ResetPage() {
   const [serverInfo, setServerInfo] = useState(null);
   const [loadingInfo, setLoadingInfo] = useState(true);
 
+  const [username, setUsername] = useState("Administrator");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
@@ -40,7 +41,7 @@ export default function ResetPage() {
     setError(null);
     setResult(null);
     try {
-      const data = await resetServer(hostname, password);
+      const data = await resetServer(hostname, username, password);
       setResult(data);
     } catch (err) {
       setError(err.message || "Reset failed");
@@ -77,6 +78,20 @@ export default function ResetPage() {
           <div className="reset-form-panel glass-panel">
             <h2 className="reset-form-panel__title">🔐 Authentication Required</h2>
             <form onSubmit={handleSubmit}>
+              <div className="form-group">
+                <label className="form-label" htmlFor="reset-user">
+                  Username
+                </label>
+                <input
+                  id="reset-user"
+                  className="input-field"
+                  type="text"
+                  placeholder="Administrator"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                />
+              </div>
               <div className="form-group">
                 <label className="form-label" htmlFor="reset-pw">
                   Administrator Password

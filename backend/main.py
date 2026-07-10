@@ -53,6 +53,7 @@ app.add_middleware(
 
 class PasswordRequest(BaseModel):
     password: str = Field(..., min_length=1)
+    username: str = Field(default="Administrator")
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +208,7 @@ async def console_websocket(websocket: WebSocket, hostname: str) -> None:
         auth_raw = await websocket.receive_text()
         auth = json.loads(auth_raw)
         password = auth.get("password", "")
+        username = auth.get("username", "Administrator")
         if not password:
             await websocket.send_json(
                 {"type": "error", "message": "Password is required"}
@@ -224,10 +226,10 @@ async def console_websocket(websocket: WebSocket, hostname: str) -> None:
 
     try:
         if is_linux:
-            session = SSHSession(server["ip"], password)
+            session = SSHSession(server["ip"], password, username=username)
             test = await session.test_connection()
         else:
-            session = WinRMSession(server["ip"], password)
+            session = WinRMSession(server["ip"], password, username=username)
             # Test connectivity with a lightweight command.
             test = await asyncio.get_running_loop().run_in_executor(
                 None, session.test_connection

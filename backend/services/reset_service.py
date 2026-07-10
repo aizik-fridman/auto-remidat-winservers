@@ -100,14 +100,14 @@ def _escape_password(password: str) -> str:
     return escaped
 
 
-def _reset_windows(target_ip: str, password: str, started_at: datetime, started_perf: float) -> ResetResult:
+def _reset_windows(target_ip: str, password: str, username: str, started_at: datetime, started_perf: float) -> ResetResult:
     from services.winrm_session import WinRMSession
     
     steps: list[CommandStep] = []
     command = "Restart-Computer -Force"
     
     try:
-        session = WinRMSession(target_ip, password)
+        session = WinRMSession(target_ip, password, username=username)
         start_step = time.perf_counter()
         
         try:
@@ -167,7 +167,7 @@ def _reset_windows(target_ip: str, password: str, started_at: datetime, started_
     )
 
 
-def _reset_linux(target_ip: str, password: str, started_at: datetime, started_perf: float) -> ResetResult:
+def _reset_linux(target_ip: str, password: str, username: str, started_at: datetime, started_perf: float) -> ResetResult:
     import asyncio
     from services.ssh_session import SSHSession
 
@@ -178,7 +178,7 @@ def _reset_linux(target_ip: str, password: str, started_at: datetime, started_pe
     # Note: If called from within an existing event loop, we might need a different approach,
     # but FastAPI executes sync route functions in a separate threadpool without a running loop.
     async def run_ssh():
-        session = SSHSession(target_ip, password)
+        session = SSHSession(target_ip, password, username=username)
         # Using a slight hack to pass password securely via env or stdin.
         # It's safer to pass it via asyncssh directly, but `run_command` doesn't support stdin out-of-the-box in our wrapper.
         # Let's write the command to pass password via echo:
@@ -242,7 +242,7 @@ def _reset_linux(target_ip: str, password: str, started_at: datetime, started_pe
     )
 
 
-def reset_server(target_ip: str, password: str, os_type: str = "windows") -> ResetResult:
+def reset_server(target_ip: str, password: str, os_type: str = "windows", username: str = "Administrator") -> ResetResult:
     """Reboot *target_ip* according to *os_type*."""
     started_at = datetime.now(timezone.utc)
     started_perf = time.perf_counter()
@@ -264,6 +264,6 @@ def reset_server(target_ip: str, password: str, os_type: str = "windows") -> Res
         )
 
     if os_type == "linux":
-        return _reset_linux(target_ip, password, started_at, started_perf)
+        return _reset_linux(target_ip, password, username, started_at, started_perf)
     else:
-        return _reset_windows(target_ip, password, started_at, started_perf)
+        return _reset_windows(target_ip, password, username, started_at, started_perf)

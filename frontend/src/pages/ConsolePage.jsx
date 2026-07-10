@@ -21,6 +21,7 @@ export default function ConsolePage() {
   const [serverInfo, setServerInfo] = useState(null);
   const [phase, setPhase] = useState("auth"); // "auth" | "connecting" | "connected"
   const [password, setPassword] = useState("");
+  const [username, setUsername] = useState("Administrator");
   const [diagnostics, setDiagnostics] = useState([]);
 
   const termRef = useRef(null);
@@ -121,7 +122,7 @@ export default function ConsolePage() {
           ),
           { label: "Authenticating…", status: "pending" },
         ]);
-        ws.send(JSON.stringify({ password: pw }));
+        ws.send(JSON.stringify({ username, password: pw }));
       };
 
       ws.onmessage = (evt) => {
@@ -244,7 +245,7 @@ export default function ConsolePage() {
         waitingForOutputRef.current = false;
       };
     },
-    [hostname, initTerminal]
+    [hostname, initTerminal, username]
   );
 
   // Disconnect
@@ -327,8 +328,22 @@ export default function ConsolePage() {
             </h2>
             <form onSubmit={handleAuthSubmit}>
               <div className="form-group">
+                <label className="form-label" htmlFor="console-user">
+                  Username
+                </label>
+                <input
+                  id="console-user"
+                  className="input-field"
+                  type="text"
+                  placeholder="Administrator"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="form-group">
                 <label className="form-label" htmlFor="console-pw">
-                  Administrator Password
+                  Password
                 </label>
                 <input
                   id="console-pw"

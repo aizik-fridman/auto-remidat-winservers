@@ -14,11 +14,11 @@ export async function fetchServer(hostname) {
   return res.json();
 }
 
-export async function resetServer(hostname, password) {
+export async function resetServer(hostname, username, password) {
   const res = await fetch(`/api/reset/${encodeURIComponent(hostname)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ username, password }),
   });
   if (!res.ok) {
     try {
