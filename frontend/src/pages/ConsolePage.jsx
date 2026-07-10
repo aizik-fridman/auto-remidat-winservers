@@ -22,6 +22,7 @@ export default function ConsolePage() {
   const [phase, setPhase] = useState("auth"); // "auth" | "connecting" | "connected"
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("Administrator");
+  const [connectionError, setConnectionError] = useState(null);
   const [diagnostics, setDiagnostics] = useState([]);
 
   const termRef = useRef(null);
@@ -214,12 +215,20 @@ export default function ConsolePage() {
         } else if (msg.type === "error") {
           const term = termRef.current;
           if (term) {
+            const errorMsg = msg.data || msg.message || "Error";
             term.writeln(
-              `\x1b[38;2;239;68;68m${msg.data || msg.message || "Error"}\x1b[0m`
+              `\x1b[38;2;239;68;68m${errorMsg}\x1b[0m`
             );
             const promptStr = serverInfo?.os === "linux" ? PROMPT_LINUX : PROMPT_WIN;
             term.write(promptStr);
             waitingForOutputRef.current = false;
+            if (phase === "connecting" || phase === "auth") {
+              setConnectionError(errorMsg);
+            }
+          } else {
+             if (phase === "connecting" || phase === "auth") {
+               setConnectionError(msg.data || msg.message || "Error");
+             }
           }
         }
       };
@@ -231,6 +240,7 @@ export default function ConsolePage() {
           ),
           { label: "Connection error", status: "error" },
         ]);
+        setConnectionError("Connection failed. Service might be closed or port blocked.");
       };
 
       ws.onclose = () => {
@@ -278,6 +288,7 @@ export default function ConsolePage() {
   const handleAuthSubmit = (e) => {
     e.preventDefault();
     if (!password.trim()) return;
+    setConnectionError(null);
     connect(password);
   };
 
@@ -326,6 +337,13 @@ export default function ConsolePage() {
             <h2 className="console-password-form__title">
               🔐 Connect to {hostname}
             </h2>
+            {connectionError && (
+              <div className="error-state" style={{ padding: 'var(--sp-3)', marginBottom: 'var(--sp-4)', borderRadius: 'var(--radius-sm)', background: 'var(--danger-soft)', border: '1px solid var(--danger)' }}>
+                <p style={{ margin: 0, color: 'var(--text-primary)', fontSize: '0.9rem', textAlign: 'left' }}>
+                  <strong>Connection Failed:</strong> {connectionError}
+                </p>
+              </div>
+            )}
             <form onSubmit={handleAuthSubmit}>
               <div className="form-group">
                 <label className="form-label" htmlFor="console-user">

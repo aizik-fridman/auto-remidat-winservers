@@ -34,6 +34,6 @@ scrape_configs:
       - targets:
           - host.docker.internal:9182
         labels:
-          system: I_Love_Shbbat
+          system: Testing
           team: Shoham
           srv_name: MY-PC-HOME
