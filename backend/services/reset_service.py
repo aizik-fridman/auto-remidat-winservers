@@ -101,35 +101,65 @@ def _escape_password(password: str) -> str:
 
 
 def _reset_windows(target_ip: str, password: str, started_at: datetime, started_perf: float) -> ResetResult:
-    safe_password = _escape_password(password)
-    share = f"\\\\{target_ip}\\IPC$"
-
-    commands = [
-        f'net use "{share}" /user:Administrator "{safe_password}"',
-        f"shutdown /r /m \\\\{target_ip} /t 0 /f",
-        f'net use "{share}" /delete /y',
-    ]
-
+    from services.winrm_session import WinRMSession
+    
     steps: list[CommandStep] = []
-    for command in commands:
-        step = _run_command(command)
-        steps.append(step)
-
-        if not step.success:
-            finished_at = datetime.now(timezone.utc)
-            return ResetResult(
-                status="failure",
-                message=step.output,
-                steps=steps,
-                started_at=started_at.isoformat(),
-                finished_at=finished_at.isoformat(),
-                execution_time_ms=int((time.perf_counter() - started_perf) * 1000),
-            )
+    command = "Restart-Computer -Force"
+    
+    try:
+        session = WinRMSession(target_ip, password)
+        start_step = time.perf_counter()
+        
+        try:
+            # We execute Restart-Computer via WinRM.
+            # This is highly likely to drop the connection immediately, causing an exception.
+            result = session.run_command(command)
+            duration = int((time.perf_counter() - start_step) * 1000)
+            
+            output = result["stdout"]
+            if result["stderr"]:
+                output += "\n" + result["stderr"]
+            output = output.strip() or "(no output)"
+            
+            success = result["exit_code"] == 0
+            steps.append(CommandStep(
+                command=command,
+                success=success,
+                output=output,
+                duration_ms=duration
+            ))
+            message = "Windows server reboot initiated successfully" if success else f"Reboot failed (exit code {result['exit_code']})"
+            
+        except Exception as e:
+            # Check if this exception is just the connection dying because of the reboot
+            err_str = str(e).lower()
+            if "connection" in err_str or "timeout" in err_str or "eof" in err_str or "transport" in err_str:
+                duration = int((time.perf_counter() - start_step) * 1000)
+                steps.append(CommandStep(
+                    command=command,
+                    success=True,
+                    output=f"Connection dropped as expected during reboot: {e}",
+                    duration_ms=duration
+                ))
+                success = True
+                message = "Windows server reboot initiated successfully (Connection dropped)"
+            else:
+                raise
+            
+    except Exception as e:
+        steps.append(CommandStep(
+            command=command,
+            success=False,
+            output=str(e),
+            duration_ms=0
+        ))
+        success = False
+        message = f"WinRM error: {e}"
 
     finished_at = datetime.now(timezone.utc)
     return ResetResult(
-        status="success",
-        message="Windows server reboot initiated successfully",
+        status="success" if success else "failure",
+        message=message,
         steps=steps,
         started_at=started_at.isoformat(),
         finished_at=finished_at.isoformat(),
