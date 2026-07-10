@@ -20,7 +20,17 @@ export async function resetServer(hostname, password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  if (!res.ok) throw new Error(`Reset failed: ${res.status}`);
+  if (!res.ok) {
+    try {
+      const errData = await res.json();
+      if (errData && errData.detail && typeof errData.detail === 'object') {
+        return errData.detail;
+      }
+    } catch (e) {
+      // Ignore JSON parse errors
+    }
+    throw new Error(`Reset failed: ${res.status}`);
+  }
   return res.json();
 }
 

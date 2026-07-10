@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import PageHeader from "../components/PageHeader.jsx";
 import ServerTable from "../components/ServerTable.jsx";
 import { fetchServers } from "../api.js";
@@ -10,6 +10,7 @@ export default function AllServersPage() {
   const [servers, setServers] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -28,12 +29,24 @@ export default function AllServersPage() {
     load();
   }, [load]);
 
+  const filteredServers = useMemo(() => {
+    if (!servers) return null;
+    if (!searchQuery) return servers;
+    const q = searchQuery.toLowerCase();
+    return servers.filter(s => 
+      s.hostname?.toLowerCase().includes(q) || 
+      s.ip?.toLowerCase().includes(q) || 
+      s.system?.toLowerCase().includes(q) ||
+      s.team?.toLowerCase().includes(q)
+    );
+  }, [servers, searchQuery]);
+
   return (
     <>
       <PageHeader
         eyebrow="Operations"
         title="Monitoring Center"
-        subtitle="Manage and monitor your Windows server fleet"
+        subtitle="Manage and monitor your server fleet in real-time"
       >
         <button
           className="btn btn--ghost"
@@ -51,6 +64,17 @@ export default function AllServersPage() {
       </PageHeader>
 
       <main className="page-wrapper">
+        <div style={{ marginBottom: 'var(--sp-6)', maxWidth: '400px' }}>
+          <input 
+            type="text" 
+            className="input-field glass-panel" 
+            style={{ width: '100%' }}
+            placeholder="Search servers by hostname, IP, system..." 
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+          />
+        </div>
+
         {loading && !servers && (
           <div className="loading-state">
             <div className="spinner" />
@@ -68,7 +92,7 @@ export default function AllServersPage() {
           </div>
         )}
 
-        {!loading && !error && servers && <ServerTable servers={servers} />}
+        {!loading && !error && filteredServers && <ServerTable servers={filteredServers} />}
       </main>
     </>
   );

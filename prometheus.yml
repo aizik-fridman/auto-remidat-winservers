@@ -32,7 +32,7 @@ scrape_configs:
 
 
       - targets:
-          - 127.0.0.1:9182
+          - host.docker.internal:9182
         labels:
           system: I_Love_Shbbat
           team: Shoham
